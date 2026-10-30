@@ -129,9 +129,12 @@ it("reads each host's active account from smith auth status", () => {
   ]);
   assert.deepStrictEqual(
     parseSmithLogins(
-      "\u001b[1mcode.test\u001b[0m (default)\n  ✓ Logged in to code.test as maria (hosts.zon)\n",
-    ).map((login) => [login.name, login.default, login.user]),
-    [["code.test", "true", "maria"]],
+      "\u001b[1mcode.test\u001b[0m (default)\n  ✓ Logged in to code.test as maria (hosts.zon)\ndown.test\n",
+    ).map((login) => [login.name, login.default, login.user, login.valid]),
+    [
+      ["code.test", "true", "maria", "true"],
+      ["down.test", "false", "", "false"],
+    ],
   );
 });
 
@@ -237,42 +240,38 @@ it.effect.each([
   },
 );
 
-it.effect("uses a smith token that cannot read the user, and rejects an empty one", () =>
+it.effect.each([
+  ["uses a smith token that cannot read the user", "smith-token\n"],
+  ["rejects an empty smith token", "\n"],
+] as const)("%s", ([, token]) =>
   Effect.gen(function* () {
-    for (const [token, works] of [
-      ["smith-token\n", true],
-      ["\n", false],
-    ] as const) {
-      const exit = yield* Effect.exit(
-        ForgejoCli.make.pipe(
-          Effect.flatMap((cli) =>
-            cli.api({
-              cwd: "/repo",
-              repository: "maria/project",
-              context: context("https://code.test/maria/project.git"),
-              path: "repos/maria/project",
-            }),
-          ),
-          Effect.provide(
-            smithHost((input) =>
-              Effect.succeed(
-                input.args[1] === "status"
-                  ? processOutput(smithStatus)
-                  : input.args[0] === "api"
-                    ? processOutput("{}", {
-                        stderr: "smith: HTTP 403\n",
-                        exitCode: ChildProcessSpawner.ExitCode(1),
-                      })
-                    : processOutput(token),
-              ),
-            ),
-          ),
+    const cli = yield* ForgejoCli.make;
+    const exit = yield* Effect.exit(
+      cli.api({
+        cwd: "/repo",
+        repository: "maria/project",
+        context: context("https://code.test/maria/project.git"),
+        path: "repos/maria/project",
+      }),
+    );
+    if (token.trim()) assert.isTrue(Exit.isSuccess(exit));
+    else assert.strictEqual(failure(exit).reason, "authentication");
+  }).pipe(
+    Effect.provide(
+      smithHost((input) =>
+        Effect.succeed(
+          input.args[1] === "status"
+            ? processOutput(smithStatus)
+            : input.args[0] === "api"
+              ? processOutput("{}", {
+                  stderr: "smith: HTTP 403\n",
+                  exitCode: ChildProcessSpawner.ExitCode(1),
+                })
+              : processOutput(token),
         ),
-      );
-      if (works) assert.isTrue(Exit.isSuccess(exit));
-      else assert.strictEqual(failure(exit).reason, "authentication");
-    }
-  }),
+      ),
+    ),
+  ),
 );
 
 it.effect("reports a smith status that fails for a reason other than a missing CLI", () =>
@@ -308,6 +307,7 @@ it.effect("reports a smith status that fails for a reason other than a missing C
 it.effect.each([
   ["fj and tea are missing", "signed-in", false, "smith", "authenticated"],
   ["smith is signed out and tea is installed", "signed-out", true, "tea", "authenticated"],
+  ["smith's login is rejected and tea is installed", "rejected", true, "smith", "unauthenticated"],
   ["fj, smith and tea are all missing", "missing", false, "tea", "unknown"],
 ] as const)("discovers Forgejo when %s", ([, smith, tea, executable, auth]) =>
   Effect.gen(function* () {
@@ -337,7 +337,12 @@ it.effect.each([
                 ? processOutput("smith 0.7.0")
                 : smith === "signed-in"
                   ? processOutput(smithStatus)
-                  : processOutput("", { exitCode: ChildProcessSpawner.ExitCode(1) }),
+                  : smith === "rejected"
+                    ? processOutput(
+                        "code.test (default)\n  X the token for maria on code.test is invalid or expired\n",
+                        { exitCode: ChildProcessSpawner.ExitCode(1) },
+                      )
+                    : processOutput("", { exitCode: ChildProcessSpawner.ExitCode(1) }),
             );
           if (input.command === "tea" && tea)
             return Effect.succeed(
