@@ -43,6 +43,9 @@ import { gitConfigEnv } from "./VcsProcess.ts";
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 const decodeVcsRef = Schema.decodeUnknownSync(VcsRef);
+const encodeWorktrunkSwitch = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Struct({ path: Schema.String })),
+);
 const decodeVcsListRefsResult = Schema.decodeUnknownSync(VcsListRefsResult);
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
@@ -3708,6 +3711,101 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           )
           .pipe(Effect.flip);
         assert.match(rootError.detail, /not a drive root/);
+      }),
+    );
+
+    it.effect("creates, records, and removes worktrees through Worktrunk", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const wtHome = yield* makeTmpDir("wt-home-");
+        const calls = yield* Ref.make<ReadonlyArray<ReadonlyArray<string>>>([]);
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const runGit = (args: ReadonlyArray<string>) =>
+          delegate
+            .spawn(ChildProcess.make("git", [...args], { cwd }))
+            .pipe(Effect.flatMap((handle) => handle.exitCode));
+        // Stands in for wt: placement from its config, worktree changes through Git.
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (!ChildProcess.isStandardCommand(command) || command.command !== "wt")
+              return yield* delegate.spawn(command);
+            const args = command.args;
+            yield* Ref.update(calls, (all) => [...all, args]);
+            const target = args.at(-1) ?? "";
+            if (args.includes("remove")) {
+              yield* runGit(["worktree", "remove", "--force", target]);
+              return makeSuccessfulHandle("[]");
+            }
+            const override = args.includes("--config-set")
+              ? args[args.indexOf("--config-set") + 1]
+              : undefined;
+            const path =
+              override === undefined
+                ? pathService.join(wtHome, target.replace(/\//g, "-"))
+                : override.slice('worktree-path = "'.length, -1).replaceAll("\\\\", "\\");
+            yield* runGit(["worktree", "add", path, target]);
+            return makeSuccessfulHandle(`${encodeWorktrunkSwitch({ path })}\n`);
+          }),
+        );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provide(layerServerConfig),
+        );
+
+        const created = yield* driver.createWorktree(
+          { cwd, path: null, refName: initialBranch, newRefName: "feature/wt" },
+          { manager: "worktrunk" },
+        );
+        const worktreePath = pathService.join(wtHome, "feature-wt");
+        assert.equal(created.worktree.path, worktreePath);
+        assert.deepEqual((yield* Ref.get(calls))[0], [
+          "switch",
+          "--no-cd",
+          "--yes",
+          "--format",
+          "json",
+          "feature/wt",
+        ]);
+        assert.equal(yield* driver.isWorktrunkWorktree({ cwd, path: worktreePath }), true);
+
+        const detached = yield* driver.createWorktree(
+          {
+            cwd,
+            path: pathService.join(wtHome, "detached"),
+            refName: yield* git(cwd, ["rev-parse", "HEAD"]),
+          },
+          { manager: "worktrunk" },
+        );
+        assert.equal((yield* Ref.get(calls)).length, 1);
+        assert.equal(
+          yield* driver.isWorktrunkWorktree({ cwd, path: detached.worktree.path }),
+          false,
+        );
+
+        yield* driver.removeWorktree({ cwd, path: worktreePath });
+        assert.equal(yield* fileSystem.exists(worktreePath), false);
+        assert.deepEqual((yield* Ref.get(calls))[1], [
+          "remove",
+          "--foreground",
+          "--no-delete-branch",
+          "--yes",
+          "--format",
+          "json",
+          worktreePath,
+        ]);
+
+        yield* driver.createWorktree(
+          { cwd, path: worktreePath, refName: "feature/wt" },
+          { manager: "worktrunk" },
+        );
+        assert.deepEqual((yield* Ref.get(calls))[2]?.slice(0, 2), [
+          "--config-set",
+          `worktree-path = "${worktreePath.replaceAll("\\", "\\\\")}"`,
+        ]);
+        assert.equal(yield* fileSystem.exists(worktreePath), true);
       }),
     );
 

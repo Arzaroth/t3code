@@ -53,6 +53,7 @@ import * as RuntimePolicy from "./RuntimePolicy.ts";
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
 const managedWorktreesDir = "/tmp/provider-turn-start-worktrees";
+const worktrunkWorktreePath = "/tmp/provider-turn-start-project.feature-restore";
 // fs.realpath applies `..` and `.` before following symlinks.
 const normalize = (target: string) => {
   const parts: Array<string> = [];
@@ -150,7 +151,7 @@ function startWithMissingWorktree(
           pruneWorktrees,
           createWorktree,
           listLocalBranchNames,
-          isWorktrunkWorktree: () => Effect.succeed(false),
+          isWorktrunkWorktree: ({ path }) => Effect.succeed(path === worktrunkWorktreePath),
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
@@ -256,6 +257,7 @@ it.each([
     recreated: false,
   },
   { label: "a relative path", worktreePath: "project/feature-restore", recreated: false },
+  { label: "a recorded Worktrunk worktree", worktreePath: worktrunkWorktreePath, recreated: true },
 ])("recreates a missing worktree only at the managed location: $label", async (input) => {
   const harness = startWithMissingWorktree(input.worktreePath, input.realPaths);
   await harness.start;
