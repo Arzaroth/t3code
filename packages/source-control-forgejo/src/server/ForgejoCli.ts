@@ -100,6 +100,17 @@ function forgejoKeysPaths(input: {
   ];
 }
 
+// fj omits the scheme in storage. Only an explicit matching HTTP remote opts into HTTP.
+function loginUrl(host: string, remoteUrl?: string) {
+  const remote = remoteUrl ? parseForgejoRemote(remoteUrl) : null;
+  const http =
+    remote &&
+    !remote.ssh &&
+    remote.host === host.toLowerCase() &&
+    /^http:\/\//i.test(remoteUrl ?? "");
+  return `${http ? "http" : "https"}://${host}`;
+}
+
 export interface ForgejoRepositoryInput {
   readonly cwd: string;
   readonly context?: SourceControlProviderContext;
@@ -295,17 +306,11 @@ export const make = Effect.gen(function* () {
     keys: typeof ForgejoKeysSchema.Type,
     remoteUrl?: string,
   ): ReturnType<typeof parseForgejoLogins> => {
-    const remote = remoteUrl ? parseForgejoRemote(remoteUrl) : null;
     return Object.keys(keys.hosts).flatMap((host) => {
       const url = parseForgejoRemote(`https://${host}`);
       // fj 0.6 drops URL mounts during whoami and OAuth renewal; tea supports them.
       if (!url || url.path) return [];
-      // fj omits the scheme in storage. Only an explicit matching HTTP remote opts into HTTP.
-      const scheme =
-        remote && !remote.ssh && remote.host === url.host && /^http:\/\//i.test(remoteUrl ?? "")
-          ? "http"
-          : "https";
-      const login = { name: host, url: `${scheme}://${host}`, user: "", default: "false" };
+      const login = { name: host, url: loginUrl(host, remoteUrl), user: "", default: "false" };
       const aliases = Object.entries(keys.aliases ?? {})
         .filter(([, target]) => target === host)
         .map(([alias]) => ({ ...login, ssh_host: alias }));
@@ -333,8 +338,9 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const requestFj = Effect.fn("ForgejoCli.requestFj")(
+  const requestWithToken = Effect.fn("ForgejoCli.requestWithToken")(
     function* (input: {
+      readonly command: "fj";
       readonly cwd: string;
       readonly baseUrl: string;
       readonly token: string;
@@ -351,7 +357,7 @@ export const make = Effect.gen(function* () {
         url.password
       )
         return yield* new ForgejoCliError({
-          command: "fj",
+          command: input.command,
           cwd: input.cwd,
           detail: "Invalid Forgejo API path.",
         });
@@ -373,7 +379,7 @@ export const make = Effect.gen(function* () {
             });
       if (body.truncated || body.invalidUtf8)
         return yield* new ForgejoCliError({
-          command: "fj",
+          command: input.command,
           cwd: input.cwd,
           reason: "invalid-response",
           detail: "Forgejo returned an oversized or invalid response.",
@@ -384,9 +390,9 @@ export const make = Effect.gen(function* () {
             ? "Forgejo repository or pull request was not found."
             : body.text
               ? `Forgejo API request failed (HTTP ${status}): ${body.text}`
-              : `Forgejo API request failed (HTTP ${status}). Check this server's fj credentials and permissions.`;
+              : `Forgejo API request failed (HTTP ${status}). Check this server's ${input.command} credentials and permissions.`;
         return yield* new ForgejoCliError({
-          command: "fj",
+          command: input.command,
           cwd: input.cwd,
           httpStatus: status,
           ...(status === 401
@@ -416,7 +422,7 @@ export const make = Effect.gen(function* () {
           error._tag === "ForgejoCliError"
             ? error
             : new ForgejoCliError({
-                command: "fj",
+                command: input.command,
                 cwd: input.cwd,
                 detail: "Forgejo API request failed or timed out.",
               }),
@@ -462,7 +468,8 @@ export const make = Effect.gen(function* () {
         detail: "fj has no credentials for this server.",
       });
     const token = yield* authenticateFj(input.cwd, login);
-    const currentUser = yield* requestFj({
+    const currentUser = yield* requestWithToken({
+      command: "fj",
       cwd: input.cwd,
       baseUrl: login.url.replace(/\/+$/, ""),
       token,
@@ -668,7 +675,8 @@ export const make = Effect.gen(function* () {
           reason: "authentication",
           detail: "fj has no credentials for this server.",
         });
-      return yield* requestFj({
+      return yield* requestWithToken({
+        command: "fj",
         cwd: input.cwd,
         baseUrl: repository.baseUrl,
         token,
