@@ -51,6 +51,7 @@ export function WorktreesDirectoryRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const mixed = useScopedSettingsMixed(["worktreesDirectory"]);
+  const managerMixed = useScopedSettingsMixed(["worktreeManager"]);
   const edited = useRef(false);
   if (
     connectedEnvironments.some(
@@ -65,7 +66,9 @@ export function WorktreesDirectoryRow() {
     <SettingsRow
       {...searchableSetting("storage-worktrees-location")}
       description={
-        "Folder where new worktrees are created, on any drive, such as D:\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder."
+        !managerMixed && settings.worktreeManager === "worktrunk"
+          ? "Used only for checkouts Worktrunk can't create, such as a detached commit. Worktrunk's own configuration decides where other worktrees go. Leave empty to use the T3 home folder."
+          : "Folder where new worktrees are created, on any drive, such as D:\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder."
       }
       serverScoped
       settingKeys={["worktreesDirectory"]}
@@ -115,7 +118,7 @@ export function WorktreeManagerRow() {
   return (
     <SettingsRow
       {...searchableSetting("worktree-manager")}
-      description="Worktrunk creates and removes worktrees with the wt command, so its configured location and hooks apply. Worktree location is then ignored."
+      description="Worktrunk creates and removes worktrees with the wt command, so its configured location and hooks apply. Worktree location then only covers checkouts Worktrunk can't create."
       serverScoped
       settingKeys={["worktreeManager"]}
       resetAction={
