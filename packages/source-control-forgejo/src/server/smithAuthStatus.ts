@@ -25,8 +25,9 @@ export function parseSmithLogins(raw: string) {
     if (sshHost) account.sshHost = sshHost;
   }
   return hosts.flatMap(({ name, isDefault, accounts }) => {
-    const account = accounts.find((item) => item.active) ?? accounts[0];
-    if (!account) return [];
+    // smith prints no account line for a host it could not reach; keep it so its error surfaces.
+    const account = accounts.find((item) => item.active) ??
+      accounts[0] ?? { user: "", valid: false, active: true };
     return [
       {
         name,

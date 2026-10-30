@@ -1,5 +1,6 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
@@ -90,6 +91,7 @@ const smithDiscovery = (
         })
       : providerAuth({
           status: "unauthenticated",
+          host: login && ForgejoCli.parseForgejoRemote(login.url)?.host,
           detail: "Authenticate this server with `smith auth login --hostname <server>`.",
         });
   },
@@ -176,7 +178,8 @@ export const makeDiscovery = Effect.gen(function* () {
         process,
         spec: smithDiscovery(remote),
       });
-      if (smith.status === "available" && smith.auth.status === "authenticated") return smith;
+      // Like fj, a smith login for the server is used even when it is rejected; tea never takes over.
+      if (smith.status === "available" && Option.isSome(smith.auth.host)) return smith;
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
       if (tea.status === "available") return tea;
       return fj.status !== "missing" ? fj : smith.status !== "missing" ? smith : tea;
