@@ -163,6 +163,7 @@ export type SourceControlProviderDiscoveryItem = typeof SourceControlProviderDis
 export const SourceControlDiscoveryResult = Schema.Struct({
   versionControlSystems: Schema.Array(VcsDiscoveryItem),
   sourceControlProviders: Schema.Array(SourceControlProviderDiscoveryItem),
+  worktrunkAvailable: Schema.optionalKey(Schema.Boolean),
 });
 export type SourceControlDiscoveryResult = typeof SourceControlDiscoveryResult.Type;
 

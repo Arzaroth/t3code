@@ -124,6 +124,19 @@ export const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ),
       sourceControlProviders: sourceControlProviders.discover,
+      worktrunkAvailable: process
+        .run({
+          operation: "source-control.discovery.probe",
+          command: "wt",
+          args: ["--version"],
+          cwd: config.cwd,
+          timeoutMs: 5_000,
+          maxOutputBytes: 8_000,
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        ),
     }),
   });
 });
