@@ -51,6 +51,9 @@ export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
+
+export const WorktreeManager = Schema.Literals(["git", "worktrunk"]);
+export type WorktreeManager = typeof WorktreeManager.Type;
 export type ExecutionEnvironmentPlatform = typeof ExecutionEnvironmentPlatform.Type;
 
 export const ServerSelfUpdateMethod = Schema.Literals(["boot-service", "respawn", "desktop-app"]);
@@ -93,6 +96,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   projectWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
   settledWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
   worktreesDirectory: Schema.optionalKey(Schema.Boolean),
+  worktreeManager: Schema.optionalKey(Schema.Boolean),
   threadAutoSettlementScope: Schema.optionalKey(Schema.Boolean),
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   projectSettingsOverrides: Schema.optionalKey(Schema.Boolean),

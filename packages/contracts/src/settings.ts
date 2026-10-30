@@ -21,7 +21,12 @@ import {
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
 import { SecretProviderId, SecretProviderSlug } from "./secretReference.ts";
-import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
+import {
+  EnvironmentMachineKind,
+  ThreadEnvMode,
+  WorktreeManager,
+  WorktreeSubmodules,
+} from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
   CustomModelSetting,
@@ -1192,6 +1197,7 @@ export const ServerSettings = Schema.Struct({
   previousWorktreesDirectories: Schema.Array(TrimmedString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  worktreeManager: WorktreeManager.pipe(Schema.withDecodingDefault(Effect.succeed("git" as const))),
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
@@ -1566,6 +1572,7 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
+  worktreeManager: Schema.optionalKey(WorktreeManager),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
