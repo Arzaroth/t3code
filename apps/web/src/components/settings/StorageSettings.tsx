@@ -13,6 +13,7 @@ import {
 import { formatBytes } from "../../lib/formatBytes";
 import { environmentAtomList, environmentIdsKey } from "../../state/environmentAtomList";
 import { serverEnvironment } from "../../state/server";
+import { sourceControlEnvironment } from "../../state/sourceControl";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -103,11 +104,28 @@ export function WorktreesDirectoryRow() {
   );
 }
 
+const worktrunkDiscoveryAtom = environmentAtomList("web-worktrunk-discovery", (environmentId) =>
+  sourceControlEnvironment.discovery({ environmentId, input: {} }),
+);
+
 export function WorktreeManagerRow() {
-  const { connectedEnvironments } = useSettingsScope();
+  const { connectedEnvironments, targets } = useSettingsScope();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const mixed = useScopedSettingsMixed(["worktreeManager"]);
+  const discoveries = useAtomValue(
+    worktrunkDiscoveryAtom(environmentIdsKey(targets.map((target) => target.environmentId))),
+  );
+  const missing = targets.filter((_, index) => {
+    const discovery = discoveries[index];
+    return discovery?._tag === "Success" && discovery.value.worktrunkAvailable === false;
+  });
+  const missingLabels = missing.flatMap((target) => {
+    const environment = connectedEnvironments.find(
+      (candidate) => candidate.environmentId === target.environmentId,
+    );
+    return environment ? [settingsScopeEnvironmentLabel(environment, connectedEnvironments)] : [];
+  });
   if (
     connectedEnvironments.some(
       (environment) => environment.serverConfig?.environment.capabilities.worktreeManager !== true,
@@ -118,7 +136,13 @@ export function WorktreeManagerRow() {
   return (
     <SettingsRow
       {...searchableSetting("worktree-manager")}
-      description="Worktrunk creates and removes worktrees with the wt command, so its configured location and hooks apply. Worktree location then only covers checkouts Worktrunk can't create."
+      description={`Worktrunk creates and removes worktrees with the wt command, so its configured location and hooks apply. Worktree location then only covers checkouts Worktrunk can't create.${
+        missing.length === 0
+          ? ""
+          : targets.length === 1
+            ? " wt was not found on this machine."
+            : ` wt was not found on ${missingLabels.join(", ")}.`
+      }`}
       serverScoped
       settingKeys={["worktreeManager"]}
       resetAction={
@@ -143,7 +167,12 @@ export function WorktreeManagerRow() {
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
             <SelectItem value="git">Git</SelectItem>
-            <SelectItem value="worktrunk">Worktrunk</SelectItem>
+            <SelectItem
+              value="worktrunk"
+              disabled={missing.length > 0 && missing.length === targets.length}
+            >
+              Worktrunk
+            </SelectItem>
           </SelectPopup>
         </Select>
       }
