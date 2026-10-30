@@ -233,6 +233,7 @@ it.effect.each([
             },
           }),
           Layer.mock(GitWorkflow.GitWorkflowService)({
+            isWorktrunkWorktree: () => Effect.succeed(false),
             pruneWorktrees: (input) =>
               Effect.sync(() => {
                 assert.deepEqual(input, { cwd: workspaceRoot });

@@ -115,6 +115,7 @@ export class GitWorkflowService extends Context.Service<
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
+    readonly isWorktrunkWorktree: GitVcsDriver.GitVcsDriver["Service"]["isWorktrunkWorktree"];
     readonly deleteLocalBranch: (
       input: GitVcsDriver.GitDeleteLocalBranchInput,
     ) => Effect.Effect<void, GitCommandError>;
@@ -465,6 +466,7 @@ export const make = Effect.gen(function* () {
         Effect.andThen(git.pruneWorktrees(input)),
       );
     }),
+    isWorktrunkWorktree: git.isWorktrunkWorktree,
     deleteLocalBranch: Effect.fn("GitWorkflowService.deleteLocalBranch")(function (input) {
       return ensureGitCommand("GitWorkflowService.deleteLocalBranch", input.cwd).pipe(
         Effect.andThen(git.deleteLocalBranch(input)),

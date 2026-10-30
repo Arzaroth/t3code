@@ -150,6 +150,7 @@ function startWithMissingWorktree(
           pruneWorktrees,
           createWorktree,
           listLocalBranchNames,
+          isWorktrunkWorktree: () => Effect.succeed(false),
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>

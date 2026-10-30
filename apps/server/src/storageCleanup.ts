@@ -810,7 +810,11 @@ const make = Effect.gen(function* () {
         const realParent = yield* fs.realPath(path.dirname(worktreePath));
         if (realPath !== path.join(realParent, path.basename(worktreePath)))
           return keep("worktree is a symbolic link");
-        if (!roots.some((root) => inside(root, realPath)))
+        const worktrunk = yield* git.isWorktrunkWorktree({
+          cwd: project.workspaceRoot,
+          path: worktreePath,
+        });
+        if (!worktrunk && !roots.some((root) => inside(root, realPath)))
           return keep("outside the managed worktree folder");
         if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
           return keep("contains a project checkout");
@@ -1028,15 +1032,23 @@ const make = Effect.gen(function* () {
           const changes = yield* localChangesReason(worktreePath, settings);
           if (changes !== null) return keep(changes);
         }
-        yield* removeLinkedWorktree({
-          operation: "StorageCleanup.cleanupGit",
-          cwd: project.workspaceRoot,
-          worktreePath,
-          // Git requires force for submodules; recursive checks above cannot make removal atomic.
-          force: submodules.force,
-          execute: git.execute,
-          run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
-        });
+        // Git requires force for submodules; recursive checks above cannot make removal atomic.
+        if (worktrunk) {
+          yield* git.removeWorktree({
+            cwd: project.workspaceRoot,
+            path: worktreePath,
+            force: submodules.force,
+          });
+        } else {
+          yield* removeLinkedWorktree({
+            operation: "StorageCleanup.cleanupGit",
+            cwd: project.workspaceRoot,
+            worktreePath,
+            force: submodules.force,
+            execute: git.execute,
+            run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
+          });
+        }
         entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
