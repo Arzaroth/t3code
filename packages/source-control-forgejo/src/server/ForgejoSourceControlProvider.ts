@@ -6,6 +6,7 @@ import * as Result from "effect/Result";
 import { SourceControlProviderError } from "@t3tools/contracts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as ForgejoCli from "./ForgejoCli.ts";
+import { parseSmithLogins } from "./smithAuthStatus.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import {
   isMissingExecutable,
@@ -61,6 +62,39 @@ export const discovery = {
     "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, install smith from https://github.com/Arzaroth/smith and run `smith auth login --hostname <server>`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.",
 } satisfies SourceControlCliDiscoverySpec;
 
+function pickLogin(
+  logins: ReturnType<typeof ForgejoCli.parseForgejoLogins>,
+  remote: ReturnType<typeof ForgejoCli.parseForgejoRemote>,
+) {
+  return (
+    (remote && ForgejoCli.matchForgejoLogin(logins, remote)) ||
+    logins.find((entry) => entry.default === "true") ||
+    logins[0]
+  );
+}
+
+const smithDiscovery = (
+  remote: ReturnType<typeof ForgejoCli.parseForgejoRemote>,
+): SourceControlCliDiscoverySpec => ({
+  ...discovery,
+  executable: "smith",
+  versionArgs: ["--version"],
+  authArgs: ["auth", "status"],
+  parseAuth: (result) => {
+    const login = pickLogin(parseSmithLogins(result.stdout), remote);
+    return login?.valid === "true"
+      ? providerAuth({
+          status: "authenticated",
+          account: login.user,
+          host: ForgejoCli.parseForgejoRemote(login.url)?.host,
+        })
+      : providerAuth({
+          status: "unauthenticated",
+          detail: "Authenticate this server with `smith auth login --hostname <server>`.",
+        });
+  },
+});
+
 export const makeDiscovery = Effect.gen(function* () {
   const cli = yield* ForgejoCli.ForgejoCli;
   const { process } = yield* SourceControlHost.SourceControlHost;
@@ -89,10 +123,7 @@ export const makeDiscovery = Effect.gen(function* () {
       const credentials = yield* Effect.result(listLogins({ cwd, command: "fj", remoteUrl }));
       const logins = Result.isSuccess(credentials) ? credentials.success : [];
       const remote = ForgejoCli.parseForgejoRemote(remoteUrl);
-      const login =
-        (remote && ForgejoCli.matchForgejoLogin(logins, remote)) ||
-        logins.find((entry) => entry.default === "true") ||
-        logins[0];
+      const login = pickLogin(logins, remote);
       const fj = yield* probeSourceControlProvider({
         cwd,
         process,
@@ -143,29 +174,7 @@ export const makeDiscovery = Effect.gen(function* () {
       const smith = yield* probeSourceControlProvider({
         cwd,
         process,
-        spec: {
-          ...discovery,
-          executable: "smith",
-          versionArgs: ["--version"],
-          authArgs: ["auth", "status"],
-          parseAuth: (result) => {
-            const smithLogins = ForgejoCli.parseSmithLogins(result.stdout);
-            const smithLogin =
-              (remote && ForgejoCli.matchForgejoLogin(smithLogins, remote)) ||
-              smithLogins.find((entry) => entry.default === "true") ||
-              smithLogins[0];
-            return smithLogin?.valid === "true"
-              ? providerAuth({
-                  status: "authenticated",
-                  account: smithLogin.user,
-                  host: ForgejoCli.parseForgejoRemote(smithLogin.url)?.host,
-                })
-              : providerAuth({
-                  status: "unauthenticated",
-                  detail: "Authenticate this server with `smith auth login --hostname <server>`.",
-                });
-          },
-        },
+        spec: smithDiscovery(remote),
       });
       if (smith.status === "available" && smith.auth.status === "authenticated") return smith;
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
@@ -460,7 +469,7 @@ export const make = Effect.gen(function* () {
         const repo = yield* cli.resolveRepository(input);
         const pull = yield* getPull(input);
         if (repo.command === "fj" || repo.command === "smith") {
-          // fj and smith check out only from the local remotes; the pull request may live elsewhere.
+          // The pull request's repository need not be one of the local remotes.
           const urls = yield* request(
             { ...input, path: repositoryPath(repo.repository) },
             RepositorySchema,

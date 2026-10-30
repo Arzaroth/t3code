@@ -6,6 +6,8 @@ import * as Result from "effect/Result";
 import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Semaphore from "effect/Semaphore";
+import * as Cache from "effect/Cache";
+import * as Exit from "effect/Exit";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - fj storage paths use explicit Windows and POSIX layouts, independently of this process's platform.
 import * as NodePath from "node:path";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
@@ -15,6 +17,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 import type { SourceControlProviderContext } from "@t3tools/source-control-core/server/SourceControlProvider";
+import { parseSmithLogins } from "./smithAuthStatus.ts";
 
 const encodeApiBody = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -48,48 +51,6 @@ export const ForgejoLoginSchema = Schema.Struct({
 export function parseForgejoLogins(raw: string) {
   const decoded = decodeJsonResult(Schema.Array(ForgejoLoginSchema))(raw);
   return Result.isSuccess(decoded) ? decoded.success : [];
-}
-
-// `smith auth status` prints each host unindented, followed by its accounts' indented lines.
-export function parseSmithLogins(raw: string) {
-  const hosts: Array<{
-    readonly name: string;
-    readonly isDefault: boolean;
-    readonly accounts: Array<{ user: string; valid: boolean; active: boolean; sshHost?: string }>;
-  }> = [];
-  for (const line of raw.replace(/\u001b\[[0-9;]*m/g, "").split("\n")) {
-    const host = /^(\S+)( \(default\))?$/.exec(line);
-    if (host?.[1]) {
-      hosts.push({ name: host[1], isDefault: !!host[2], accounts: [] });
-      continue;
-    }
-    const accounts = hosts.at(-1)?.accounts;
-    if (!accounts) continue;
-    const status = /^\s+([✓X]) (?:Logged in to \S+(?: as (\S+))?)?/.exec(line);
-    if (status) {
-      accounts.push({ user: status[2] ?? "", valid: status[1] === "✓", active: true });
-      continue;
-    }
-    const account = accounts.at(-1);
-    if (!account) continue;
-    if (/^\s+- Active account: no$/.test(line)) account.active = false;
-    const sshHost = /^\s+- SSH host: (\S+)$/.exec(line)?.[1];
-    if (sshHost) account.sshHost = sshHost;
-  }
-  return hosts.flatMap(({ name, isDefault, accounts }) => {
-    const account = accounts.find((item) => item.active) ?? accounts[0];
-    if (!account) return [];
-    return [
-      {
-        name,
-        url: `https://${name}`,
-        ...(account.sshHost ? { ssh_host: account.sshHost } : {}),
-        valid: String(account.valid),
-        user: account.user,
-        default: String(isDefault),
-      } satisfies typeof ForgejoLoginSchema.Type,
-    ];
-  });
 }
 
 export const ForgejoKeysSchema = Schema.Struct({
@@ -269,8 +230,6 @@ export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const authLock = yield* Semaphore.make(1);
   const authenticated = new Map<string, { token: string; time: number }>();
-  const smithSessions = new Map<string, { token: string; user: string; time: number }>();
-  let smithLogins: { logins: ReturnType<typeof parseForgejoLogins>; time: number } | undefined;
   const execute: ForgejoCli["Service"]["execute"] = (input) =>
     process
       .run({
@@ -285,7 +244,7 @@ export const make = Effect.gen(function* () {
             new ForgejoCliError({
               command: input.command ?? "tea",
               cwd: input.cwd,
-              ...(input.command === "fj" || input.command === "smith" ? {} : { cause }),
+              ...((input.command ?? "tea") === "tea" ? { cause } : {}),
               ...(cause._tag === "VcsProcessSpawnError"
                 ? { reason: "missing-cli" as const }
                 : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
@@ -363,30 +322,26 @@ export const make = Effect.gen(function* () {
     });
   };
 
-  // `smith auth status` checks every account over the network, so its answer is reused briefly.
-  const readSmithLogins = Effect.fn("ForgejoCli.readSmithLogins")(function* (cwd: string) {
-    const now = yield* Clock.currentTimeMillis;
-    if (smithLogins && now - smithLogins.time < 30_000) return smithLogins.logins;
-    const status = yield* execute({
-      command: "smith",
-      cwd,
-      args: ["auth", "status"],
-      allowNonZeroExit: true,
-    }).pipe(Effect.result);
-    if (Result.isFailure(status) && status.failure.reason !== "missing-cli")
-      return yield* status.failure;
-    const logins = Result.isSuccess(status) ? parseSmithLogins(status.success.stdout) : [];
-    smithLogins = { logins, time: now };
-    return logins;
-  });
+  // `smith auth status` checks every account over the network, so concurrent callers share one run.
+  const smithLogins = yield* Cache.makeWith(
+    (cwd: string) =>
+      execute({ command: "smith", cwd, args: ["auth", "status"], allowNonZeroExit: true }).pipe(
+        Effect.map((status) => parseSmithLogins(status.stdout)),
+        Effect.catchIf(
+          (error) => error.reason === "missing-cli",
+          () => Effect.succeed([]),
+        ),
+      ),
+    { capacity: 16, timeToLive: (exit) => (Exit.isSuccess(exit) ? "30 seconds" : 0) },
+  );
 
   const authenticateSmith = Effect.fn("ForgejoCli.authenticateSmith")(function* (
     cwd: string,
     host: string,
   ) {
     const now = yield* Clock.currentTimeMillis;
-    const cached = smithSessions.get(host);
-    if (cached && now - cached.time < 30_000) return cached;
+    const cached = authenticated.get(`smith:${host}`);
+    if (cached && now - cached.time < 30_000) return cached.token;
     // smith renews an expiring browser login before a request, never when printing its token.
     const viewer = yield* execute({
       command: "smith",
@@ -395,18 +350,18 @@ export const make = Effect.gen(function* () {
       allowNonZeroExit: true,
     });
     const status = Number(/^smith: HTTP (\d{3})$/m.exec(viewer.stderr)?.[1]);
+    const rejected = viewer.exitCode === 4 || status === 401;
+    // A token without the user scope still serves the repository API.
     if (viewer.exitCode !== 0 && status !== 403)
       return yield* new ForgejoCliError({
         command: "smith",
         cwd,
         ...(status ? { httpStatus: status } : {}),
-        ...(viewer.exitCode === 4 || status === 401 ? { reason: "authentication" as const } : {}),
-        detail:
-          viewer.exitCode === 4 || status === 401
-            ? `Authenticate this server with \`smith auth login --hostname ${host}\`.`
-            : `smith could not reach ${host}${status ? ` (HTTP ${status})` : ""}.`,
+        ...(rejected ? { reason: "authentication" as const } : {}),
+        detail: rejected
+          ? `Authenticate this server with \`smith auth login --hostname ${host}\`.`
+          : `smith could not reach ${host}${status ? ` (HTTP ${status})` : ""}.`,
       });
-    const user = decodeJsonResult(Schema.Struct({ login: Schema.String }))(viewer.stdout);
     const token = (yield* execute({
       command: "smith",
       cwd,
@@ -419,9 +374,8 @@ export const make = Effect.gen(function* () {
         reason: "authentication",
         detail: `smith has no credentials for ${host}. Authenticate again with smith.`,
       });
-    const session = { token, user: Result.isSuccess(user) ? user.success.login : "", time: now };
-    smithSessions.set(host, session);
-    return session;
+    authenticated.set(`smith:${host}`, { token, time: now });
+    return token;
   }, authLock.withPermits(1));
 
   const listLogins: NonNullable<ForgejoCli["Service"]["listLogins"]> = Effect.fn(
@@ -440,7 +394,7 @@ export const make = Effect.gen(function* () {
       return publicLogins(keys.success, input.remoteUrl);
     }
     if (input.command === "smith")
-      return (yield* readSmithLogins(input.cwd)).map((login) => ({
+      return (yield* Cache.get(smithLogins, input.cwd)).map((login) => ({
         ...login,
         url: loginUrl(login.name, input.remoteUrl),
       }));
@@ -563,6 +517,21 @@ export const make = Effect.gen(function* () {
     authenticated.set(login.url, { token: refreshed, time: now });
     return refreshed;
   }, authLock.withPermits(1));
+
+  const storedFjToken = Effect.fn("ForgejoCli.storedFjToken")(function* (
+    cwd: string,
+    host: string,
+  ) {
+    const token = (yield* readKeys(cwd)).hosts[host]?.token;
+    if (!token)
+      return yield* new ForgejoCliError({
+        command: "fj",
+        cwd,
+        reason: "authentication",
+        detail: "fj has no credentials for this server.",
+      });
+    return token;
+  });
 
   const getAccount: NonNullable<ForgejoCli["Service"]["getAccount"]> = Effect.fn(
     "ForgejoCli.getAccount",
@@ -719,8 +688,7 @@ export const make = Effect.gen(function* () {
       );
       if (login) {
         command = "smith";
-        const session = yield* authenticateSmith(input.cwd, login.name);
-        login = { ...login, user: session.user || login.user };
+        yield* authenticateSmith(input.cwd, login.name);
       }
     }
     if (!login) {
@@ -791,31 +759,14 @@ export const make = Effect.gen(function* () {
         path = `repos/${repository.repository.split("/").map(encodeURIComponent).join("/")}${path.slice(prefix.length)}`;
       }
     }
-    if (repository.command === "fj") {
-      const token = (yield* readKeys(input.cwd)).hosts[repository.login]?.token;
-      if (!token)
-        return yield* new ForgejoCliError({
-          command: "fj",
-          cwd: input.cwd,
-          reason: "authentication",
-          detail: "fj has no credentials for this server.",
-        });
+    if (repository.command === "fj" || repository.command === "smith")
       return yield* requestWithToken({
-        command: "fj",
+        command: repository.command,
         cwd: input.cwd,
         baseUrl: repository.baseUrl,
-        token,
-        path,
-        ...(input.method === undefined ? {} : { method: input.method }),
-        ...(stdin === undefined ? {} : { body: stdin }),
-      });
-    }
-    if (repository.command === "smith")
-      return yield* requestWithToken({
-        command: "smith",
-        cwd: input.cwd,
-        baseUrl: repository.baseUrl,
-        token: (yield* authenticateSmith(input.cwd, repository.login)).token,
+        token: yield* repository.command === "fj"
+          ? storedFjToken(input.cwd, repository.login)
+          : authenticateSmith(input.cwd, repository.login),
         path,
         ...(input.method === undefined ? {} : { method: input.method }),
         ...(stdin === undefined ? {} : { body: stdin }),
