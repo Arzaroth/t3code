@@ -179,7 +179,8 @@ are, and cleanup covers both the default folder and the custom one.
 
 If you manage worktrees with [Worktrunk](https://worktrunk.dev), set **Settings → Worktrees →
 Worktree manager** to **Worktrunk** on that machine. T3 then creates and removes worktrees with
-`wt`, so Worktrunk's configured location and hooks apply instead of **Worktree location**. Project
+`wt`, so Worktrunk's configured location and hooks apply. **Worktree location** then only covers
+checkouts Worktrunk can't create, such as a detached commit. Project
 hooks run without an approval prompt. Cleanup and missing-worktree recreation treat these worktrees
 like T3's own, and each one keeps using the manager that created it if you switch back to Git.
 `wt` must be on the server's `PATH`.
