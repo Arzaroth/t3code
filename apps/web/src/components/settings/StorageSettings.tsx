@@ -100,6 +100,54 @@ export function WorktreesDirectoryRow() {
   );
 }
 
+export function WorktreeManagerRow() {
+  const { connectedEnvironments } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const mixed = useScopedSettingsMixed(["worktreeManager"]);
+  if (
+    connectedEnvironments.some(
+      (environment) => environment.serverConfig?.environment.capabilities.worktreeManager !== true,
+    )
+  )
+    return null;
+
+  return (
+    <SettingsRow
+      {...searchableSetting("worktree-manager")}
+      description="Worktrunk creates and removes worktrees with the wt command, so its configured location and hooks apply. Worktree location is then ignored."
+      serverScoped
+      settingKeys={["worktreeManager"]}
+      resetAction={
+        mixed || settings.worktreeManager !== "git" ? (
+          <SettingResetButton
+            label="worktree manager"
+            onClick={() => updateSettings({ worktreeManager: "git" })}
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={mixed ? null : settings.worktreeManager}
+          onValueChange={(next) => {
+            if (next === "git" || next === "worktrunk") updateSettings({ worktreeManager: next });
+          }}
+        >
+          <SelectTrigger size="sm" aria-label="Worktree manager">
+            <SelectValue>
+              {mixed ? "Mixed" : settings.worktreeManager === "worktrunk" ? "Worktrunk" : "Git"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem value="git">Git</SelectItem>
+            <SelectItem value="worktrunk">Worktrunk</SelectItem>
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
 function RetentionControl({
   label,
   value,

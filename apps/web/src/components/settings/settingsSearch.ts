@@ -243,6 +243,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "worktree-manager",
+    title: "Worktree manager",
+    to: "/settings/worktrees",
+    scope: "environment-defaults",
+    searchTerms: ["worktree manager worktrunk wt git hooks create remove"],
+  },
+  {
     id: "storage-worktrees-location",
     title: "Worktree location",
     to: "/settings/worktrees",
