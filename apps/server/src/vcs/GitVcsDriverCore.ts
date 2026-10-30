@@ -4028,42 +4028,49 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  const defaultWorktreePath = Effect.fnUntraced(function* (
+    cwd: string,
+    targetBranch: string,
+    worktreesDirectory: string | undefined,
+  ) {
+    // Resolve sub/.. before taking the basename.
+    const repoName = path.basename(path.resolve(cwd));
+    const parentDir = resolveWorktreesDirectory(
+      worktreesDirectory ?? "",
+      worktreesDir,
+      path,
+      yield* HostProcess.HomeDirectory,
+    );
+    if (parentDir === null) {
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.createWorktree",
+        command: "git worktree add",
+        cwd,
+        detail: `The worktree location "${worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Worktrees.`,
+      });
+    }
+    let directoryName = targetBranch.replace(/\//g, "-");
+    // Leave room for files beneath the worktree on Windows, regardless of branch length.
+    if (directoryName.length > 40) {
+      const digest = yield* crypto
+        .digest("SHA-256", new TextEncoder().encode(targetBranch))
+        .pipe(Effect.orDie);
+      // Avoid splitting a surrogate pair, which Git would list back as a different path.
+      const prefix = directoryName.slice(0, 23).replace(/[\uD800-\uDBFF]$/, "");
+      directoryName = `${prefix}-${Hex.encode(digest).slice(0, 16)}`;
+    }
+    return path.join(parentDir, repoName, directoryName);
+  });
+
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.refName);
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.newRefName);
     const targetBranch = input.newRefName ?? input.refName;
-    // Resolve sub/.. before taking the basename.
-    const repoName = path.basename(path.resolve(input.cwd));
-    let worktreePath = input.path;
-    if (worktreePath == null) {
-      const parentDir = resolveWorktreesDirectory(
-        options?.worktreesDirectory ?? "",
-        worktreesDir,
-        path,
-        yield* HostProcess.HomeDirectory,
-      );
-      if (parentDir === null) {
-        return yield* new GitCommandError({
-          operation: "GitVcsDriver.createWorktree",
-          command: "git worktree add",
-          cwd: input.cwd,
-          detail: `The worktree location "${options?.worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Worktrees.`,
-        });
-      }
-      let directoryName = targetBranch.replace(/\//g, "-");
-      // Leave room for files beneath the worktree on Windows, regardless of branch length.
-      if (directoryName.length > 40) {
-        const digest = yield* crypto
-          .digest("SHA-256", new TextEncoder().encode(targetBranch))
-          .pipe(Effect.orDie);
-        // Avoid splitting a surrogate pair, which Git would list back as a different path.
-        const prefix = directoryName.slice(0, 23).replace(/[\uD800-\uDBFF]$/, "");
-        directoryName = `${prefix}-${Hex.encode(digest).slice(0, 16)}`;
-      }
-      worktreePath = path.join(parentDir, repoName, directoryName);
-    }
+    const worktreePath =
+      input.path ??
+      (yield* defaultWorktreePath(input.cwd, targetBranch, options?.worktreesDirectory));
     if (input.newRefName) {
       // Kept apart from the checkout so the shared-config lock only covers the tracking write.
       yield* createBranchAt(
