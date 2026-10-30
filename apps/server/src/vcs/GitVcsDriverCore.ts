@@ -45,7 +45,7 @@ import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { removeEmptyDirectory } from "./removeEmptyDirectory.ts";
 import { explicitBareRepositoryEnv, gitConfigEnv } from "./VcsProcess.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
-import { resolveWorktreesDirectory } from "../worktreesDirectory.ts";
+import { resolveWorktreesDirectory, worktrunkWorktreeConfigKey } from "../worktreesDirectory.ts";
 import {
   parseRemoteNames,
   parseRemoteNamesInGitOrder,
@@ -178,6 +178,8 @@ interface GitRefsSnapshot {
   readonly remoteBranches: ReadonlyArray<VcsRef>;
   readonly hasPrimaryRemote: boolean;
 }
+
+type ExecuteInput = GitVcsDriver.ExecuteGitInput & { readonly program?: "wt" };
 
 interface ExecuteGitOptions {
   stdin?: string | undefined;
@@ -433,6 +435,17 @@ function gitCommandContext(
     cwd: input.cwd,
     argumentCount: input.args.length,
   } as const;
+}
+
+const decodeWorktrunkSwitchResult = decodeJsonResult(Schema.Struct({ path: Schema.String }));
+
+// Worktrunk marks its own error lines with ✗; hook output around them can echo anything.
+function worktrunkFailureDetail(stderr: string, fallback: string): string {
+  const line = stderr
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split("\n")
+    .findLast((entry) => entry.trimStart().startsWith("✗"));
+  return line === undefined ? fallback : line.trim().slice(0, 500);
 }
 
 // Stderr can echo credentials from argv/URLs; classify fixed patterns without exposing matched text.
@@ -949,7 +962,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const statusFetches = new Map<string, Fiber.Fiber<void, GitCommandError>>();
   const statusFetchProcesses = yield* Semaphore.make(4);
 
-  const executeRaw: GitVcsDriver.GitVcsDriver["Service"]["execute"] = Effect.fnUntraced(
+  const executeRaw: (
+    input: ExecuteInput,
+  ) => Effect.Effect<GitVcsDriver.ExecuteGitResult, GitCommandError> = Effect.fnUntraced(
     function* (input) {
       const commandInput = {
         ...input,
@@ -981,9 +996,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         };
         const env = { ...baseEnv, ...explicitBareRepositoryEnv(baseEnv, hostPlatform) };
         const spawnEnv = { ...env, ...windowsLongPathConfigEnv(hostPlatform, env) };
-        const resolved = yield* resolveSpawnCommand("git", [], { env: spawnEnv });
+        const program = input.program ?? "git";
+        const resolved = yield* resolveSpawnCommand(program, [], { env: spawnEnv });
         // cmd wrappers truncate multiline commits; leave git.cmd handling to Node lookup.
-        const executable = resolved.shell ? "git" : resolved.command;
+        const executable = resolved.shell ? program : resolved.command;
         const child = yield* commandSpawner
           .spawn(
             ChildProcess.make(executable, commandInput.args, {
@@ -997,7 +1013,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               (cause) =>
                 new GitCommandError({
                   ...gitCommandContext(commandInput),
-                  detail: "Failed to spawn Git process.",
+                  detail:
+                    program === "wt"
+                      ? "Failed to start wt. Install Worktrunk, or set Settings → Worktrees → Worktree manager to Git."
+                      : "Failed to spawn Git process.",
                   cause,
                 }),
             ),
@@ -1105,7 +1124,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }),
     );
 
-  const execute: GitVcsDriver.GitVcsDriver["Service"]["execute"] = (input) =>
+  const execute = (input: ExecuteInput) =>
     executeRaw(input).pipe(
       withMetrics({
         counter: gitCommandsTotal,
@@ -4062,15 +4081,90 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return path.join(parentDir, repoName, directoryName);
   });
 
+  const isWorktrunkWorktree: GitVcsDriver.GitVcsDriver["Service"]["isWorktrunkWorktree"] = (
+    input,
+  ) =>
+    readConfigValue(
+      input.cwd,
+      worktrunkWorktreeConfigKey(path.resolve(input.cwd, input.path)),
+    ).pipe(
+      Effect.map((value) => value === "worktrunk"),
+      Effect.orElseSucceed(() => false),
+    );
+
+  const addWorktrunkWorktree = Effect.fn("addWorktrunkWorktree")(function* (
+    cwd: string,
+    branch: string,
+    requestedPath: string | null,
+  ) {
+    const args = [
+      ...(requestedPath === null
+        ? []
+        : [
+            "--config-set",
+            `worktree-path = "${requestedPath.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`,
+          ]),
+      "switch",
+      "--no-cd",
+      "--yes",
+      "--format",
+      "json",
+      branch,
+    ];
+    const result = yield* execute({
+      operation: "GitVcsDriver.createWorktree.worktrunk",
+      cwd,
+      args,
+      program: "wt",
+      allowNonZeroExit: true,
+      timeoutMs: null,
+    });
+    const created =
+      result.exitCode === 0
+        ? decodeWorktrunkSwitchResult(result.stdout.trim().split("\n").at(-1) ?? "")
+        : null;
+    if (created === null || Result.isFailure(created)) {
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.createWorktree.worktrunk",
+        command: "wt switch",
+        cwd,
+        argumentCount: args.length,
+        ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+        detail: worktrunkFailureDetail(result.stderr, "wt switch failed"),
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
+    }
+    const worktreePath = path.resolve(cwd, created.success.path);
+    yield* writeConfigValue({
+      cwd,
+      key: worktrunkWorktreeConfigKey(worktreePath),
+      value: "worktrunk",
+    });
+    return worktreePath;
+  });
+
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.refName);
     yield* refuseOptionLikeRefName("GitVcsDriver.createWorktree", input.cwd, input.newRefName);
     const targetBranch = input.newRefName ?? input.refName;
-    const worktreePath =
-      input.path ??
-      (yield* defaultWorktreePath(input.cwd, targetBranch, options?.worktreesDirectory));
+    // Worktrunk makes a new branch from any other target, and reads `{` in a path as a template.
+    const useWorktrunk =
+      options?.manager === "worktrunk" &&
+      !input.path?.includes("{") &&
+      (input.newRefName != null ||
+        (yield* executeGit(
+          "GitVcsDriver.createWorktree.isLocalBranch",
+          input.cwd,
+          ["show-ref", "--verify", "--quiet", `refs/heads/${input.refName}`],
+          { allowNonZeroExit: true },
+        )).exitCode === 0);
+    const gitWorktreePath = useWorktrunk
+      ? null
+      : (input.path ??
+        (yield* defaultWorktreePath(input.cwd, targetBranch, options?.worktreesDirectory)));
     if (input.newRefName) {
       // Kept apart from the checkout so the shared-config lock only covers the tracking write.
       yield* createBranchAt(
@@ -4079,35 +4173,39 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         "git worktree add failed",
       );
     }
-    const args = ["worktree", "add", "--", worktreePath, input.newRefName ?? input.refName];
     const progress = options?.progress;
-    const onCheckoutProgress = progress?.onCheckoutProgress;
+    const worktreePath =
+      gitWorktreePath ?? (yield* addWorktrunkWorktree(input.cwd, targetBranch, input.path ?? null));
+    if (gitWorktreePath !== null) {
+      const args = ["worktree", "add", "--", worktreePath, input.newRefName ?? input.refName];
+      const onCheckoutProgress = progress?.onCheckoutProgress;
 
-    const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
-    yield* executeGitWithStableDiagnostics(
-      "GitVcsDriver.createWorktree",
-      input.cwd,
-      ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
-      {
-        fallbackErrorDetail: "git worktree add failed",
-        // Large checkouts and post-checkout hooks can legitimately run for many
-        // minutes; a fixed deadline kills them and leaves an orphaned worktree.
-        timeoutMs: null,
-        ...(onCheckoutProgress
-          ? {
-              // Git only prints checkout progress when stderr is a tty or the
-              // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0" },
-              progress: {
-                onStderrLine: (line) => {
-                  const parsed = parseGitCheckoutProgressLine(line);
-                  return parsed ? onCheckoutProgress(parsed) : Effect.void;
+      const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
+      yield* executeGitWithStableDiagnostics(
+        "GitVcsDriver.createWorktree",
+        input.cwd,
+        ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+        {
+          fallbackErrorDetail: "git worktree add failed",
+          // Large checkouts and post-checkout hooks can legitimately run for many
+          // minutes; a fixed deadline kills them and leaves an orphaned worktree.
+          timeoutMs: null,
+          ...(onCheckoutProgress
+            ? {
+                // Git only prints checkout progress when stderr is a tty or the
+                // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
+                env: { GIT_PROGRESS_DELAY: "0" },
+                progress: {
+                  onStderrLine: (line) => {
+                    const parsed = parseGitCheckoutProgressLine(line);
+                    return parsed ? onCheckoutProgress(parsed) : Effect.void;
+                  },
                 },
-              },
-            }
-          : {}),
-      },
-    );
+              }
+            : {}),
+        },
+      );
+    }
 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);
@@ -4553,6 +4651,45 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return empty && (yield* removeEmptyDirectory(target));
   });
 
+  const removeWorktrunkWorktree = Effect.fn("removeWorktrunkWorktree")(function* (
+    cwd: string,
+    target: string,
+    force: boolean,
+  ) {
+    const args = [
+      "remove",
+      "--foreground",
+      "--no-delete-branch",
+      "--yes",
+      "--format",
+      "json",
+      ...(force ? ["--force"] : []),
+      target,
+    ];
+    const result = yield* execute({
+      operation: "GitVcsDriver.removeWorktree.worktrunk",
+      cwd,
+      args,
+      program: "wt",
+      allowNonZeroExit: true,
+      timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
+    });
+    if (result.exitCode === 0) return;
+    if (!(yield* fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)))) {
+      return yield* pruneWorktrees({ cwd });
+    }
+    return yield* new GitCommandError({
+      operation: "GitVcsDriver.removeWorktree.worktrunk",
+      command: "wt remove",
+      cwd,
+      argumentCount: args.length,
+      ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+      detail: worktrunkFailureDetail(result.stderr, "wt remove failed"),
+      stdoutLength: result.stdout.length,
+      stderrLength: result.stderr.length,
+    });
+  });
+
   const removeWorktree: GitVcsDriver.GitVcsDriver["Service"]["removeWorktree"] = Effect.fn(
     "removeWorktree",
   )(function* (input) {
@@ -4560,6 +4697,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // folder than this path. Resolving it once keeps Git, the Windows deletion
     // in removeLinkedWorktree, and the leftover cleanup below on one directory.
     const target = path.resolve(input.cwd, input.path);
+    if (yield* isWorktrunkWorktree({ cwd: input.cwd, path: target })) {
+      return yield* removeWorktrunkWorktree(input.cwd, target, input.force === true);
+    }
     const result = yield* removeLinkedWorktree({
       operation: "GitVcsDriver.removeWorktree",
       cwd: input.cwd,
@@ -4921,6 +5061,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     removeWorktree: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, removeWorktree(input));
     }),
+    isWorktrunkWorktree,
     pruneWorktrees: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, pruneWorktrees(input));
     }),

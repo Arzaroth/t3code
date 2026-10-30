@@ -22,6 +22,10 @@ export function resolveWorktreesDirectory(
   return isFilesystemRoot(resolved, path) ? null : resolved;
 }
 
+/** Repository config marking a worktree T3 created through Worktrunk, which places it outside the managed folders. */
+export const worktrunkWorktreeConfigKey = (worktreePath: string) =>
+  `t3-worktree.${worktreePath}.manager`;
+
 /** Callers re-check after resolving symlinks: a link can point at a root. */
 export function isFilesystemRoot(directory: string, path: Path.Path): boolean {
   return path.dirname(directory) === directory;
