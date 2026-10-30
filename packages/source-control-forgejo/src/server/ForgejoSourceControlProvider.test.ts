@@ -1278,6 +1278,15 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
               "https://code.test/forgejo/api/v1/repos/maria/project",
               "https://code.test/forgejo/api/v1/repos/reviewer/project/contents/file.ts",
             ];
+            if (input.command === "smith")
+              return Effect.fail(
+                new VcsProcessSpawnError({
+                  operation: input.operation,
+                  command: input.command,
+                  cwd: input.cwd,
+                  cause: new Error("smith not found"),
+                }),
+              );
             if (input.args.at(-1)?.endsWith("/user")) assert.notInclude(input.args, "--repo");
             assert.strictEqual(input.command, "tea");
             return Effect.succeed(
@@ -1706,6 +1715,15 @@ it.effect(
                         }),
                       );
                     }
+                    if (input.command === "smith")
+                      return Effect.fail(
+                        new VcsProcessSpawnError({
+                          operation: input.operation,
+                          command: input.command,
+                          cwd: input.cwd,
+                          cause: new Error("smith not found"),
+                        }),
+                      );
                     assert.strictEqual(input.command, "tea");
                     return Effect.succeed(
                       input.args[0] === "--version"

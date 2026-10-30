@@ -59,7 +59,7 @@ export const definition = defineSourceControl({
   label: "Forgejo",
   pickerLabel: "Forgejo / Gitea",
   icon,
-  searchKeywords: ["gitea", "tea", "codeberg"],
+  searchKeywords: ["gitea", "tea", "codeberg", "smith"],
   changeRequest: {
     shortLabel: "PR",
     shortLabelWithArticle: "a PR",
@@ -93,7 +93,7 @@ export const definition = defineSourceControl({
     repositoryUrl
       ? `git fetch '${repositoryUrl.replaceAll("'", "'\\''")}' ${changeRequestHeadRef(number)} && git checkout -B pulls/${number} FETCH_HEAD`
       : null,
-  changeRequestCloseCommand: /\b(?:tea\s+(?:pr|pulls)|fj\s+pr)\s+(?:merge|close)\b/u,
+  changeRequestCloseCommand: /\b(?:tea\s+(?:pr|pulls)|(?:fj|smith)\s+pr)\s+(?:merge|close)\b/u,
   authorProfileUrl: () => null,
   // Forgejo refuses a change request review without a summary, even with inline comments.
   reviewSummaryRequired: (verdict) => verdict === "request-changes",

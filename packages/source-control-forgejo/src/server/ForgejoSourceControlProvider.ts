@@ -58,7 +58,7 @@ export const discovery = {
       : null;
   },
   installHint:
-    "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.",
+    "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, install smith from https://github.com/Arzaroth/smith and run `smith auth login --hostname <server>`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.",
 } satisfies SourceControlCliDiscoverySpec;
 
 export const makeDiscovery = Effect.gen(function* () {
@@ -140,8 +140,37 @@ export const makeDiscovery = Effect.gen(function* () {
         }
         return fj;
       }
+      const smith = yield* probeSourceControlProvider({
+        cwd,
+        process,
+        spec: {
+          ...discovery,
+          executable: "smith",
+          versionArgs: ["--version"],
+          authArgs: ["auth", "status"],
+          parseAuth: (result) => {
+            const smithLogins = ForgejoCli.parseSmithLogins(result.stdout);
+            const smithLogin =
+              (remote && ForgejoCli.matchForgejoLogin(smithLogins, remote)) ||
+              smithLogins.find((entry) => entry.default === "true") ||
+              smithLogins[0];
+            return smithLogin?.valid === "true"
+              ? providerAuth({
+                  status: "authenticated",
+                  account: smithLogin.user,
+                  host: ForgejoCli.parseForgejoRemote(smithLogin.url)?.host,
+                })
+              : providerAuth({
+                  status: "unauthenticated",
+                  detail: "Authenticate this server with `smith auth login --hostname <server>`.",
+                });
+          },
+        },
+      });
+      if (smith.status === "available" && smith.auth.status === "authenticated") return smith;
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
-      return tea.status === "available" || fj.status === "missing" ? tea : fj;
+      if (tea.status === "available") return tea;
+      return fj.status !== "missing" ? fj : smith.status !== "missing" ? smith : tea;
     }),
     refineUnknownRemote: Effect.fn("ForgejoSourceControlProvider.refineUnknownRemote")(
       function* (input: {
@@ -151,7 +180,7 @@ export const makeDiscovery = Effect.gen(function* () {
         const remote = ForgejoCli.parseForgejoRemote(input.context.remoteUrl);
         if (!remote) return null;
         let failure: ForgejoCli.ForgejoCliError | undefined;
-        for (const command of ["fj", "tea"] as const) {
+        for (const command of ["fj", "smith", "tea"] as const) {
           const logins = yield* listLogins({
             cwd: input.cwd,
             command,
@@ -430,8 +459,8 @@ export const make = Effect.gen(function* () {
       function* (input) {
         const repo = yield* cli.resolveRepository(input);
         const pull = yield* getPull(input);
-        if (repo.command === "fj") {
-          // fj checkout cannot target a repository outside the local remotes.
+        if (repo.command === "fj" || repo.command === "smith") {
+          // fj and smith check out only from the local remotes; the pull request may live elsewhere.
           const urls = yield* request(
             { ...input, path: repositoryPath(repo.repository) },
             RepositorySchema,
