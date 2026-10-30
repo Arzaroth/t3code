@@ -178,7 +178,6 @@ export const makeDiscovery = Effect.gen(function* () {
         process,
         spec: smithDiscovery(remote),
       });
-      // Like fj, a smith login for the server is used even when it is rejected; tea never takes over.
       if (smith.status === "available" && Option.isSome(smith.auth.host)) return smith;
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
       if (tea.status === "available") return tea;
