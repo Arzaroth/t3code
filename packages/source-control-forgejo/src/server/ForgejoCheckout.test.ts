@@ -15,9 +15,9 @@ import * as ForgejoSourceControlProvider from "./ForgejoSourceControlProvider.ts
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-it.effect(
-  "checks out fj pull refs and preserves existing branches and dirty files until forced",
-  () =>
+it.effect.each(["fj", "smith"] as const)(
+  "checks out %s pull refs and preserves existing branches and dirty files until forced",
+  (command) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const git = (yield* SourceControlHost.SourceControlHost).process;
@@ -86,7 +86,7 @@ it.effect(
             Layer.mock(ForgejoCli.ForgejoCli)({
               resolveRepository: () =>
                 Effect.succeed({
-                  command: "fj",
+                  command,
                   login: "work",
                   repository: "reviewer/project",
                   baseUrl: "https://forgejo.test",
